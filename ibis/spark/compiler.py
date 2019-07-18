@@ -92,6 +92,63 @@ def _type_to_sql_string(tval):
         raise com.UnsupportedBackendType(name)
 
 
+def _date_op(func):
+    if func not in ('date_add', 'date_sub'):
+        raise com.UnsupportedArgumentError(
+            "func must be one of ('date_add', 'date_sub')"
+        )
+
+    def _formatter(translator, expr):
+        op = expr.op()
+        left, right = op.args
+        formatted_left = translator.translate(left)
+        func_name = func
+
+        if isinstance(right.op(), ops.IntervalFromInteger):
+            unit = right.op().unit
+            value = right.op().arg
+        elif isinstance(right.op(), ops.Literal):
+            unit = right.op().dtype.unit
+            value = ibis.literal(right.op().value)
+
+        multiplier = 1
+        if unit == 'W':
+            multiplier *= 7
+        elif unit in ('Y', 'M'):
+            func_name = 'add_months'
+            if func == 'date_sub':
+                multiplier *= -1
+            if unit == 'Y':
+                multiplier *= 12
+
+        formatted_right = translator.translate(multiplier * value)
+
+        return '{}({}, {})'.format(func_name, formatted_left, formatted_right)
+
+    return _formatter
+
+
+def _timestamp_op(func):
+    if func not in ('timestamp_add', 'timestamp_sub'):
+        raise com.UnsupportedArgumentError(
+            "func must be one of ('timestamp_add', 'timestamp_sub')"
+        )
+
+    def _formatter(translator, expr):
+        op = expr.op()
+        left, right = op.args
+        if not isinstance(right, ir.IntervalScalar):
+            raise NotImplementedError('Interval columns not supported')
+        formatted_left = translator.translate(left)
+        formatted_right = translator.translate(right)
+        func_name = func
+
+        operator = '+' if func_name == 'timestamp_add' else '-'
+        return '({} {} {})'.format(formatted_left, operator, formatted_right)
+
+    return _formatter
+
+
 _spark_date_unit_names = {
     'Y': 'YEAR',
     'Q': 'QUARTER',
@@ -239,6 +296,14 @@ def _map_value_for_key(translator, expr):
     return '{}[{}]'.format(arg_formatted, field_formatted)
 
 
+def _array_index(translator, expr):
+    arg = expr.op().arg
+    index = expr.op().index + 1
+    return 'element_at({}, {})'.format(
+        translator.translate(arg), translator.translate(index)
+    )
+
+
 def _round(translator, expr):
     op = expr.op()
     arg, digits = op.args
@@ -259,6 +324,7 @@ _operation_registry.update(
         ops.StructField: _struct_field,
         ops.MapValueForKey: _map_value_for_key,
         ops.ArrayLength: unary('size'),
+        ops.ArrayIndex: _array_index,
         ops.Round: _round,
         ops.HLLCardinality: _reduction('approx_count_distinct'),
         ops.StrRight: fixed_arity('right', 2),
@@ -275,6 +341,10 @@ _operation_registry.update(
         ops.ExtractMinute: unary('minute'),
         ops.ExtractSecond: unary('second'),
         ops.TimestampTruncate: _timestamp_truncate,
+        ops.DateAdd: _date_op('date_add'),
+        ops.DateSub: _date_op('date_sub'),
+        ops.TimestampAdd: _timestamp_op('timestamp_add'),
+        ops.TimestampSub: _timestamp_op('timestamp_sub'),
         ops.TimestampFromUNIX: _timestamp_from_unix,
         ops.DateTruncate: _date_truncate,
         ops.Literal: _literal,
